@@ -1,0 +1,141 @@
+---
+title: "Predicting the Quality of Execution of Weighting Lifting Exercises"
+author: "Chia Ying Lee"
+date: "June 10, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+library(data.table, quietly = T)
+library(caret, quietly = T)
+library(ggplot2, quietly = T)
+library(randomForest, quietly = T)
+```
+
+
+In this project, we use accelerometer data collected from participants of a weight lifting study to build a prediction model of how well the participants executed the weight lifting tasks. The data come from [cite research group source](http://groupware.les.inf.puc-rio.br/har), where sensors placed on the belt, forearm, arm, and dumbell of each participant measure acceleration, roll, pitch and yaw in various directions. To collect the data, the participants were asked to perform the weight lifting tasks in a multitude of correct and incorrect ways (5 categories in total), and the accelerometer data along with the category for the (in-)correctness of the task execution was recorded. Thus, the goal of this project is to build a model to predict the category for the (in-)correctness of the task execution, given the accelerometer data.
+
+### Overview/summary of this report
+
+We build a random forest prediction model for the category of (in-)correctness of executing a weight lifting task, by first determining the relevant predictor variables and then training a random forest model on a subsetted training data set (80% of the full data set). Training the random forest model involves tuning the parameter `mtry`, for which we use 5-fold cross-validation. Finally, we test the model on the remaining 20% of the data, in order to estimate the expected out-of-sample error.
+
+
+
+## Download and load data
+
+We download the training data from the provided URL, and then load it.
+
+```{r download_data, cache = T}
+train.destfile <- "./pml-training.csv"
+
+if (!file.exists(train.destfile))
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", destfile = train.destfile)
+
+dat <- data.table::fread(train.destfile)
+```
+
+## Model Selection
+
+The data contains a column `classe` which is the response variable, 152 columns of accelerometer data, as well as the name of the participants and timestamps. To ensure the prediction model is generalizable to any arbitrary participant, we will use only accelerometer data and not use participant names nor timestamps.
+
+First, we pre-process the data to ensure that the accelerometer data columns are numeric.
+
+```{r preprocess_data, warning = F}
+data.cols <- names(dat)[-c(1:7, ncol(dat))] # accelerometer data columns
+
+## Convert relevant columns to numeric values
+dat[, `:=`((data.cols), lapply(.SD, as.numeric)), .SDcols = data.cols]
+```
+
+Many data columns contain a large number of missing values. A check of the proportion of `NA`s in each column reveals that only 52 columns have no missing values, and the rest of the columns contain more than 98% of missing values.
+
+```{r check_nas}
+check.nas <- sapply(dat[, .SD, .SDcols = data.cols], function(col) mean(is.na(col)))
+summary(check.nas[check.nas > 0]) # Summary of proportion of missing values
+(keep.cols <- names(check.nas)[check.nas == 0]) # 52 predictor variables without missing values
+```
+
+There are too many missing values for imputation of missing values to make sense, therefore we will build the prediction model based on the 52 variables shown above.
+
+```{r choose_dat_columns}
+## Keep columns that don't have missing values
+dat <- dat[, .SD, .SDcols = c(keep.cols, "classe")]
+```
+
+
+## Prediction Model: Random Forest Model
+
+We propose to use the random forest method for the prediction model.
+
+First, we partition the data into a training and a test set, holding out 20% of the data for the test set for final evaluation of the random forest model. 
+
+```{r partition_data, cache = T}
+set.seed(1)
+trainID <- createDataPartition(dat$classe, p = 0.8, list = F)
+
+dat.train <- dat[trainID, ] # Training set
+dat.test <- dat[-trainID, ] # Test set to evaluate the model
+```
+
+On the training set, we will train the random forest model using 5-fold cross validation, using 50 trees and varying the tuning parameter `mtry` (the number of variables to split on) from 4 to 10. 
+
+```{r fit_rf, cache = T}
+set.seed(2)
+fit.rf <- train(classe ~ ., 
+                data      = dat.train, 
+                method    = "rf",
+                tuneGrid  = expand.grid(.mtry = 4:10), # tuning parameter
+                trControl = trainControl(method = "cv", number = 5), # 5-fold CV
+                ntree     = 50)
+```
+
+A summary of the fitted random forest model is shown below. 
+
+```{r}
+print(fit.rf)
+```
+
+The final random forest model was found to yield optimal accuracy with `mtry = 8` (which, coincidentally, is close to the theoretically suggested value of $\sqrt{52}$).
+The following figure visualizes the accuracy w.r.t. the `mtry` parameter, and illustrates the optimal value of `mtry` attaining a 99.4% accuracy.
+
+```{r}
+ggplot(fit.rf$results, aes(mtry, Accuracy)) +
+    geom_point(size = 2)
+```
+
+
+The following plot shows that the variables of highest importance are the roll and yaw of the belt, followed by the pitch of the forearm and belt.
+
+```{r}
+varImpPlot(fit.rf$finalModel)
+```
+
+
+## Testing the Prediction Model
+
+Finally, we test the prediction model from the previous section on the test set. This will gives us an idea of the accuracy to expect were the prediction model be applied to new data.
+
+```{r pred_rf, cache = T}
+pred.test <- predict(fit.rf, newdata = dat.test)
+mean(pred.test == dat.test$classe)
+```
+
+Therefore, we may expect about 99.4% accuracy on new data, or a 0.6% out-of-sample error.
+
+## Applying the Prediction Model to the 20 Test Cases
+
+```{r}
+test.destfile = "./pml-testing.csv"
+
+if (!file.exists(test.destfile))
+    download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", destfile = test.destfile)
+
+testdata <- fread(test.destfile)
+
+(pred20 <- predict(fit.rf, newdata = testdata))
+```
+
+## Conclusions
+
+We have built a random forest prediction model for the category of (in-)correctness of executing a weight lifting task, based on 52 predictor variables. The random forest model was trained on 80% of the data, and tuning parameter `mtry = 8` was determined using 5-fold cross-validation. Finally, the model was tested on the remaining 20% of the data, yielding a 99.4% accuracy. We may expect the same amount out-of-sample error (i.e., 0.6% error).
